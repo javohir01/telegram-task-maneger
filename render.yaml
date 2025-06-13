@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: telegram-task-manager
+    env: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    envVars:
+      - key: APP_KEY
+        generateValue: true
+      - key: DB_HOST
+        fromDatabase:
+          name: telegram-task-manager-db
+          property: host
+      - key: DB_DATABASE
+        fromDatabase:
+          name: telegram-task-manager-db
+          property: database
+      - key: DB_USERNAME
+        fromDatabase:
+          name: telegram-task-manager-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: telegram-task-manager-db
+          property: password
+    buildCommand: |
+      php artisan storage:link
+      php artisan config:cache
+      php artisan route:cache
+      php artisan view:cache
+    startCommand: php artisan serve
+    healthCheckPath: /
+    disk:
+      name: telegram-task-manager-storage
+      mountPath: /var/www/storage
+      sizeGB: 1
+
+databases:
+  - name: telegram-task-manager-db
+    plan: free
+    postgresMajorVersion: 15
