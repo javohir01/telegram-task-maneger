@@ -1,0 +1,48 @@
+version: '3'
+services:
+  app:
+    build:
+      args:
+        user: laravel
+        uid: 1000
+      context: ./
+      dockerfile: Dockerfile
+    image: telegram-task-manager
+    container_name: telegram-task-manager-app
+    restart: unless-stopped
+    working_dir: /var/www/
+    volumes:
+      - ./:/var/www
+    networks:
+      - telegram-task-manager
+
+  nginx:
+    image: nginx:alpine
+    container_name: telegram-task-manager-nginx
+    restart: unless-stopped
+    ports:
+      - 8000:80
+    volumes:
+      - ./:/var/www
+      - ./docker-compose/nginx:/etc/nginx/conf.d/
+    networks:
+      - telegram-task-manager
+
+  db:
+    image: postgres:15
+    container_name: telegram-task-manager-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - ./docker-compose/postgres:/var/lib/postgresql/data
+    ports:
+      - 5432:5432
+    networks:
+      - telegram-task-manager
+
+networks:
+  telegram-task-manager:
+    driver: bridge
