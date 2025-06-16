@@ -1,5 +1,4 @@
-# Multi-stage build
-FROM composer:2.6 as composer
+# Use PHP 8.3 with FPM and Alpine Linux
 FROM php:8.3-fpm-alpine
 
 # Install system dependencies
@@ -13,50 +12,68 @@ RUN apk add --no-cache \
     zip \
     unzip \
     nginx \
-    supervisor
+    supervisor \
+    && rm -rf /var/cache/apk/*
 
 # Install PHP extensions
-RUN docker-php-ext-install \
-    pdo \
-    pdo_pgsql \
-    pgsql \
-    mbstring \
-    exif \
-    pcntl \
-    bcmath \
-    gd
+RUN docker-php-ext-configure gd \
+    && docker-php-ext-install \
+        pdo \
+        pdo_pgsql \
+        pgsql \
+        mbstring \
+        exif \
+        pcntl \
+        bcmath \
+        gd
 
-# Copy composer from composer image
-COPY --from=composer /usr/bin/composer /usr/bin/composer
+# Install Composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
 # Set working directory
 WORKDIR /var/www
 
-# Copy composer files
-COPY composer.json composer.lock ./
+# Copy composer files first (for better caching)
+COPY composer.json composer.lock* ./
 
 # Install PHP dependencies
-RUN composer install --no-dev --optimize-autoloader --no-interaction
+RUN composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist
 
 # Copy application code
 COPY . .
+
+# Create necessary directories and set permissions
+RUN mkdir -p /var/www/storage/logs \
+    && mkdir -p /var/www/storage/framework/cache \
+    && mkdir -p /var/www/storage/framework/sessions \
+    && mkdir -p /var/www/storage/framework/views \
+    && mkdir -p /var/www/bootstrap/cache \
+    && mkdir -p /run/nginx \
+    && mkdir -p /var/log/supervisor
 
 # Set permissions
 RUN chown -R www-data:www-data /var/www \
     && chmod -R 755 /var/www/storage \
     && chmod -R 755 /var/www/bootstrap/cache
 
-# Copy nginx configuration
+# Copy configuration files
 COPY docker/nginx.conf /etc/nginx/nginx.conf
-
-# Copy supervisor configuration
 COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# Create nginx run directory
-RUN mkdir -p /run/nginx
+# Create startup script
+RUN echo '#!/bin/sh' > /start.sh \
+    && echo 'php artisan config:cache' >> /start.sh \
+    && echo 'php artisan route:cache' >> /start.sh \
+    && echo 'php artisan view:cache' >> /start.sh \
+    && echo 'exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf' >> /start.sh \
+    && chmod +x /start.sh
 
-# Expose port
+# Expose port 80
 EXPOSE 80
 
-# Start supervisor
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost/ || exit 1
+
+# Start the application
+CMD ["/start.sh"]
