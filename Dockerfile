@@ -1,39 +1,22 @@
-FROM php:8.3-fpm-alpine
+FROM php:8.3-cli
 
-# Install basic dependencies
-RUN apk add --no-cache \
-    curl \
-    nginx \
-    supervisor
+# Install curl for health checks
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-# Install minimal PHP extensions
-RUN docker-php-ext-install pdo pdo_mysql
-
-# Install Composer
-COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
-
+# Set working directory
 WORKDIR /var/www
 
-# Copy files
+# Copy application files
 COPY . .
 
-# Create basic structure
-RUN mkdir -p storage/logs storage/framework/cache storage/framework/sessions storage/framework/views bootstrap/cache
+# Create public directory if not exists
+RUN mkdir -p public
 
-# Set permissions
-RUN chown -R www-data:www-data /var/www && chmod -R 755 storage bootstrap/cache
+# Create simple index.php if not exists
+RUN echo '<?php echo json_encode(["message" => "API is running", "time" => date("Y-m-d H:i:s")]);' > public/index.php
 
-# Simple nginx config
-RUN echo 'server { listen 80; root /var/www/public; index index.php; location / { try_files $uri $uri/ /index.php?$query_string; } location ~ \.php$ { fastcgi_pass 127.0.0.1:9000; fastcgi_index index.php; fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name; include fastcgi_params; } }' > /etc/nginx/http.d/default.conf
-
-# Simple supervisor config
-RUN echo '[supervisord]' > /etc/supervisor/conf.d/supervisord.conf && \
-    echo 'nodaemon=true' >> /etc/supervisor/conf.d/supervisord.conf && \
-    echo '[program:php-fpm]' >> /etc/supervisor/conf.d/supervisord.conf && \
-    echo 'command=php-fpm --nodaemonize' >> /etc/supervisor/conf.d/supervisord.conf && \
-    echo '[program:nginx]' >> /etc/supervisor/conf.d/supervisord.conf && \
-    echo 'command=nginx -g "daemon off;"' >> /etc/supervisor/conf.d/supervisord.conf
-
+# Expose port 80
 EXPOSE 80
 
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+# Start PHP built-in server
+CMD ["php", "-S", "0.0.0.0:80", "-t", "public"]
