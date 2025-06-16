@@ -11,9 +11,6 @@ use Illuminate\Support\Facades\Validator;
 
 class TaskController extends Controller
 {
-    /**
-     * Display a listing of the resource.
-     */
     public function index(Request $request)
     {
         $validator = Validator::make($request->all(), [
@@ -43,7 +40,6 @@ class TaskController extends Controller
 
         $query = $user->tasks();
 
-        // Apply filters
         if ($request->has('status')) {
             $query->where('status', $request->input('status'));
         }
@@ -68,9 +64,6 @@ class TaskController extends Controller
         ]);
     }
 
-    /**
-     * Store a newly created resource in storage.
-     */
     public function store(Request $request)
     {
         $validator = Validator::make($request->all(), [

@@ -7,23 +7,10 @@ use Illuminate\Support\Facades\Http;
 
 class RegisterTelegramBot extends Command
 {
-    /**
-     * The name and signature of the console command.
-     *
-     * @var string
-     */
     protected $signature = 'telegram:register {--delete : Delete the webhook before setting it}';
 
-    /**
-     * The console command description.
-     *
-     * @var string
-     */
     protected $description = 'Register the Telegram bot webhook';
 
-    /**
-     * Execute the console command.
-     */
     public function handle()
     {
         $token = config('services.telegram.bot_token');
@@ -39,7 +26,6 @@ class RegisterTelegramBot extends Command
             return 1;
         }
 
-        // Delete webhook if requested
         if ($this->option('delete')) {
             $this->info('Deleting existing webhook...');
             $deleteResponse = Http::get("https://api.telegram.org/bot{$token}/deleteWebhook");
@@ -53,7 +39,6 @@ class RegisterTelegramBot extends Command
             }
         }
 
-        // Set webhook
         $this->info('Setting webhook to: ' . $webhookUrl);
         $response = Http::post("https://api.telegram.org/bot{$token}/setWebhook", [
             'url' => $webhookUrl,
@@ -65,7 +50,6 @@ class RegisterTelegramBot extends Command
         if ($result['ok'] ?? false) {
             $this->info('Webhook set successfully!');
             
-            // Get webhook info
             $infoResponse = Http::get("https://api.telegram.org/bot{$token}/getWebhookInfo");
             $infoResult = $infoResponse->json();
             
