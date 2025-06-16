@@ -1,6 +1,11 @@
 # Use PHP 8.3 with FPM and Alpine Linux
 FROM php:8.3-fpm-alpine
 
+# Set environment variables
+ENV COMPOSER_ALLOW_SUPERUSER=1
+ENV COMPOSER_NO_INTERACTION=1
+ENV COMPOSER_MEMORY_LIMIT=-1
+
 # Install system dependencies
 RUN apk add --no-cache \
     git \
@@ -13,6 +18,7 @@ RUN apk add --no-cache \
     unzip \
     nginx \
     supervisor \
+    bash \
     && rm -rf /var/cache/apk/*
 
 # Install PHP extensions
@@ -25,7 +31,15 @@ RUN docker-php-ext-configure gd \
         exif \
         pcntl \
         bcmath \
-        gd
+        gd \
+        xml \
+        dom \
+        fileinfo \
+        filter \
+        hash \
+        openssl \
+        session \
+        tokenizer
 
 # Install Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
@@ -34,10 +48,33 @@ COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 WORKDIR /var/www
 
 # Copy composer files first (for better caching)
-COPY composer.json composer.lock* ./
+COPY composer.json ./
 
-# Install PHP dependencies
-RUN composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist
+# Create basic Laravel structure if not exists
+RUN mkdir -p app bootstrap config database public resources routes storage tests \
+    && mkdir -p storage/app storage/framework storage/logs \
+    && mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views \
+    && mkdir -p bootstrap/cache
+
+# Create minimal Laravel files if they don't exist
+RUN echo '<?php return [];' > config/app.php \
+    && echo '<?php return [];' > config/database.php \
+    && echo '<?php return [];' > config/cache.php \
+    && echo '<?php return [];' > config/session.php
+
+# Install PHP dependencies with error handling
+RUN composer install \
+    --no-dev \
+    --optimize-autoloader \
+    --no-interaction \
+    --prefer-dist \
+    --no-scripts \
+    || (echo "Composer install failed, trying with scripts..." && \
+        composer install \
+        --no-dev \
+        --optimize-autoloader \
+        --no-interaction \
+        --prefer-dist)
 
 # Copy application code
 COPY . .
@@ -61,10 +98,15 @@ COPY docker/nginx.conf /etc/nginx/nginx.conf
 COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # Create startup script
-RUN echo '#!/bin/sh' > /start.sh \
-    && echo 'php artisan config:cache' >> /start.sh \
-    && echo 'php artisan route:cache' >> /start.sh \
-    && echo 'php artisan view:cache' >> /start.sh \
+RUN echo '#!/bin/bash' > /start.sh \
+    && echo 'set -e' >> /start.sh \
+    && echo 'echo "Starting application..."' >> /start.sh \
+    && echo 'if [ ! -f /var/www/.env ]; then' >> /start.sh \
+    && echo '  cp /var/www/.env.example /var/www/.env' >> /start.sh \
+    && echo 'fi' >> /start.sh \
+    && echo 'php artisan config:cache || echo "Config cache failed"' >> /start.sh \
+    && echo 'php artisan route:cache || echo "Route cache failed"' >> /start.sh \
+    && echo 'php artisan view:cache || echo "View cache failed"' >> /start.sh \
     && echo 'exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf' >> /start.sh \
     && chmod +x /start.sh
 
