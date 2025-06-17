@@ -6,6 +6,7 @@ use App\Models\TelegramGroup;
 use App\Models\TelegramUser;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
 
 class TelegramBotService
 {
@@ -18,14 +19,6 @@ class TelegramBotService
         $this->apiUrl = "https://api.telegram.org/bot{$this->token}";
     }
 
-    /**
-     * Send a message to a chat.
-     *
-     * @param int|string $chatId
-     * @param string $text
-     * @param array $options
-     * @return array|null
-     */
     public function sendMessage($chatId, string $text, array $options = []): ?array
     {
         $params = array_merge([
@@ -47,14 +40,7 @@ class TelegramBotService
         }
     }
 
-    /**
-     * Send a message with inline keyboard.
-     *
-     * @param int|string $chatId
-     * @param string $text
-     * @param array $keyboard
-     * @return array|null
-     */
+
     public function sendInlineKeyboard($chatId, string $text, array $keyboard): ?array
     {
         return $this->sendMessage($chatId, $text, [
@@ -64,53 +50,23 @@ class TelegramBotService
         ]);
     }
 
-    /**
-     * Process an update from Telegram.
-     *
-     * @param array $update
-     * @return void
-     */
     public function processUpdate(array $update): void
     {
-        if (isset($update['message'])) {
-            $this->processMessage($update['message']);
-        } elseif (isset($update['callback_query'])) {
-            $this->processCallbackQuery($update['callback_query']);
+        try {
+            if (isset($update['message'])) {
+                $this->processMessage($update['message']);
+            } elseif (isset($update['callback_query'])) {
+                $this->processCallbackQuery($update['callback_query']);
+            }
+        } catch (\Exception $e) {
+            Log::error('Error processing update', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'update' => $update
+            ]);
         }
     }
 
-    /**
-     * Process a message from Telegram.
-     *
-     * @param array $message
-     * @return void
-     */
-    protected function processMessage(array $message): void
-    {
-        $chatId = $message['chat']['id'];
-        $text = $message['text'] ?? '';
-        $user = $message['from'];
-
-        // Save or update user
-        $telegramUser = $this->saveUser($user);
-
-        // Check if this is a group chat
-        if (in_array($message['chat']['type'], ['group', 'supergroup'])) {
-            $this->saveGroup($message['chat'], $telegramUser);
-        }
-
-        // Process commands
-        if (str_starts_with($text, '/')) {
-            $this->processCommand($text, $chatId, $telegramUser);
-        }
-    }
-
-    /**
-     * Process a callback query from Telegram.
-     *
-     * @param array $callbackQuery
-     * @return void
-     */
     protected function processCallbackQuery(array $callbackQuery): void
     {
         $data = $callbackQuery['data'];
@@ -131,6 +87,12 @@ class TelegramBotService
                 break;
             case 'task_create':
                 $this->startTaskCreation($chatId, $telegramUser);
+                break;
+            case 'task_create_simple':
+                $this->startSimpleTaskCreation($chatId, $telegramUser);
+                break;
+            case 'task_create_advanced':
+                $this->startAdvancedTaskCreation($chatId, $telegramUser);
                 break;
             case 'task_view':
                 $taskId = $parts[1] ?? null;
@@ -157,25 +119,21 @@ class TelegramBotService
                     $this->updateTaskStatus($chatId, $telegramUser, $taskId, $status);
                 }
                 break;
+            case 'help':
+                $this->handleHelpCommand($chatId);
+                break;
         }
 
-        // Answer callback query to remove loading state
         Http::post("{$this->apiUrl}/answerCallbackQuery", [
             'callback_query_id' => $callbackQuery['id'],
         ]);
     }
 
-    /**
-     * Process a command from Telegram.
-     *
-     * @param string $text
-     * @param int|string $chatId
-     * @param TelegramUser $user
-     * @return void
-     */
     protected function processCommand(string $text, $chatId, TelegramUser $user): void
     {
-        $command = strtolower(explode(' ', $text)[0]);
+        $parts = explode(' ', $text);
+        $command = strtolower($parts[0]);
+        $args = array_slice($parts, 1);
 
         switch ($command) {
             case '/start':
@@ -188,90 +146,239 @@ class TelegramBotService
                 $this->sendTaskList($chatId, $user);
                 break;
             case '/create':
-                $this->startTaskCreation($chatId, $user);
+                if (!empty($args)) {
+                    $this->handleCreateCommand($chatId, $user, implode(' ', $args));
+                } else {
+                    $this->startTaskCreation($chatId, $user);
+                }
+                break;
+            case '/edit':
+                Log::info('Edit command received', [
+                    'chat_id' => $chatId,
+                    'user_id' => $user->id,
+                    'args' => $args
+                ]);
+                if (count($args) < 2) {
+                    $this->sendMessage($chatId, "Usage: /edit <task_id> <title> | <description> | <priority> | <due_date>");
+                    return;
+                }
+                $taskId = array_shift($args);
+                $updateText = implode(' ', $args);
+                if (empty($updateText)) {
+                  $this->editTask($chatId, $user, $taskId);
+                } else {
+                  $this->handleUpdateCommand($chatId, $user, $taskId . '|' . $updateText);
+                }
                 break;
             default:
-                $this->sendMessage($chatId, "Невідома команда. Використайте /help для отримання списку доступних команд.");
+                $this->sendMessage($chatId, "Unknown command. Use /help to get a list of available commands.");
                 break;
         }
     }
 
-    /**
-     * Handle the /start command.
-     *
-     * @param int|string $chatId
-     * @param TelegramUser $user
-     * @return void
-     */
+    protected function handleCreateCommand($chatId, TelegramUser $user, string $text): void
+    {
+        // This handles advanced creation from command or advanced mode
+        $parts = explode('|', $text);
+        
+        try {
+            $task = $user->tasks()->create([
+                'title' => trim($parts[0]),
+                'description' => trim($parts[1] ?? ''),
+                'priority' => trim(strtolower($parts[2] ?? 'medium')),
+                'due_date' => isset($parts[3]) ? date('Y-m-d H:i:s', strtotime(trim($parts[3]))) : null,
+                'status' => 'pending'
+            ]);
+
+            $this->sendMessage($chatId, "✅ Task \"{$task->title}\" created successfully!");
+            $this->viewTask($chatId, $user, $task->id);
+            
+        } catch (\Exception $e) {
+            Log::error('Error creating advanced task', [
+                'error' => $e->getMessage(),
+                'user_id' => $user->id,
+                'text' => $text
+            ]);
+            $this->sendMessage($chatId, "❌ Error creating task. Please try again.");
+        }
+    }
+
+    protected function startSimpleTaskCreation($chatId, TelegramUser $user): void
+    {
+        $message = "Enter task title:";
+        // Save state that user is creating simple task
+        Cache::put("task_creation_{$chatId}", 'simple', 3600);
+        
+        $this->sendMessage($chatId, $message);
+    }
+
+    protected function startAdvancedTaskCreation($chatId, TelegramUser $user): void
+    {
+        $message = "Please enter task details in the following format:\n\n";
+        $message .= "<b>Title | Description | Priority | Due Date</b>\n\n";
+        $message .= "Example:\n";
+        $message .= "<code>Buy milk | Get 2 liters from store | high | 2023-06-20</code>\n\n";
+        $message .= "Priority can be: low, medium, high, urgent\n";
+        $message .= "Date format: YYYY-MM-DD";
+        
+        $this->sendMessage($chatId, $message);
+    }
+
+    protected function processMessage(array $message): void
+    {
+        $chatId = $message['chat']['id'];
+        $text = $message['text'] ?? '';
+        $user = $message['from'];
+
+        $telegramUser = $this->saveUser($user);
+
+        // Check if user is in task creation mode
+        $creationMode = Cache::get("task_creation_{$chatId}");
+        
+        if ($creationMode === 'simple' && !str_starts_with($text, '/')) {
+            $this->handleSimpleTaskCreation($chatId, $telegramUser, $text);
+            Cache::forget("task_creation_{$chatId}");
+            return;
+        }
+
+        if (in_array($message['chat']['type'], ['group', 'supergroup'])) {
+            $this->saveGroup($message['chat'], $telegramUser);
+        }
+
+        if (str_starts_with($text, '/')) {
+            $this->processCommand($text, $chatId, $telegramUser);
+        }
+    }
+
+    protected function handleSimpleTaskCreation($chatId, TelegramUser $user, string $title): void
+    {
+        try {
+            $task = $user->tasks()->create([
+                'title' => trim($title),
+                'description' => '',
+                'priority' => 'medium',
+                'status' => 'pending',
+                'due_date' => null
+            ]);
+
+            $this->sendMessage($chatId, "✅ Task \"{$title}\" created successfully!");
+            $this->viewTask($chatId, $user, $task->id);
+            
+            // Show options after creation
+            $keyboard = [
+                [
+                    ['text' => '✏️ Add Details', 'callback_data' => "task_edit:{$task->id}"],
+                    ['text' => '📋 Task List', 'callback_data' => 'task_list']
+                ]
+            ];
+            
+            $this->sendInlineKeyboard($chatId, "What would you like to do next?", $keyboard);
+            
+        } catch (\Exception $e) {
+            Log::error('Error creating simple task', [
+                'error' => $e->getMessage(),
+                'user_id' => $user->id,
+                'title' => $title
+            ]);
+            $this->sendMessage($chatId, "❌ Error creating task. Please try again.");
+        }
+    }
+
+    protected function handleUpdateCommand($chatId, TelegramUser $user, string $taskId): void
+    {
+        try {
+            $parts = explode('|', $taskId);
+            $actualTaskId = trim(array_shift($parts));
+
+            $task = $user->tasks()->find($actualTaskId);
+            if (!$task) {
+                $this->sendMessage($chatId, "Task not found or you don't have access to it.");
+                return;
+            }
+
+            if (empty($parts)) {
+                $this->editTask($chatId, $user, $actualTaskId);
+                return;
+            }
+
+            $updateData = [
+                'title' => trim($parts[0] ?? $task->title),
+                'description' => trim($parts[1] ?? $task->description),
+                'priority' => trim(strtolower($parts[2] ?? $task->priority)),
+                'due_date' => !empty($parts[3]) ? date('Y-m-d H:i:s', strtotime(trim($parts[3]))) : $task->due_date
+            ];
+            
+            $task->update($updateData);
+
+            $this->sendMessage($chatId, "✅ Task \"{$updateData['title']}\" updated successfully!");
+            $this->viewTask($chatId, $user, $task->id);
+
+        } catch (\Exception $e) {
+            Log::error('Error updating task', [
+                'error' => $e->getMessage(),
+                'user_id' => $user->id,
+                'task_id' => $taskId,
+                'update_data' => $parts ?? []
+            ]);
+            $this->sendMessage($chatId, "❌ Error updating task. Please try again.");
+        }
+    }
+
     protected function handleStartCommand($chatId, TelegramUser $user): void
     {
-        $name = $user->first_name ?: 'користувач';
-        $message = "Привіт, {$name}! 👋\n\n";
-        $message .= "Ласкаво просимо до Task Manager бота. Цей бот допоможе вам керувати вашими завданнями.\n\n";
-        $message .= "Використайте /help для отримання списку доступних команд.";
-
+        $name = $user->first_name ?: 'user';
+        $message = "Hello, {$name}! 👋\n\n";
+        $message .= "Welcome to Task Manager bot. This bot will help you manage your tasks.\n\n";
+        $message .= "To get started, you can use the following commands:\n";
         $keyboard = [
             [
-                ['text' => '📋 Мої завдання', 'callback_data' => 'task_list'],
-                ['text' => '➕ Створити завдання', 'callback_data' => 'task_create']
+                ['text' => '📋 My Tasks', 'callback_data' => 'task_list'],
+                ['text' => '➕ Create Task', 'callback_data' => 'task_create']
             ],
             [
-                ['text' => '❓ Допомога', 'callback_data' => 'help']
+                ['text' => '❓ Help', 'callback_data' => 'help']
             ]
         ];
 
         $this->sendInlineKeyboard($chatId, $message, $keyboard);
     }
 
-    /**
-     * Handle the /help command.
-     *
-     * @param int|string $chatId
-     * @return void
-     */
     protected function handleHelpCommand($chatId): void
     {
-        $message = "<b>Доступні команди:</b>\n\n";
-        $message .= "/start - Запуск бота та реєстрація користувача.\n";
-        $message .= "/help - Вивід довідки по командам бота.\n";
-        $message .= "/tasks - Переглянути список ваших завдань.\n";
-        $message .= "/create - Створити нове завдання.\n";
+        $message = "<b>Available commands:</b>\n\n";
+        $message .= "/start - Start the bot and register user.\n";
+        $message .= "/help - Show help information.\n";
+        $message .= "/tasks - View your task list.\n";
+        $message .= "/create - Create a new task.\n";
 
         $this->sendMessage($chatId, $message);
     }
 
-    /**
-     * Send the task list to the user.
-     *
-     * @param int|string $chatId
-     * @param TelegramUser $user
-     * @return void
-     */
     protected function sendTaskList($chatId, TelegramUser $user): void
     {
         $tasks = $user->tasks()->orderBy('created_at', 'desc')->get();
 
         if ($tasks->isEmpty()) {
-            $message = "У вас поки немає завдань. Використайте команду /create щоб створити нове завдання.";
+            $message = "You don't have any tasks yet. Use /create command to create a new task.";
             $keyboard = [
                 [
-                    ['text' => '➕ Створити завдання', 'callback_data' => 'task_create']
+                    ['text' => '➕ Create Task', 'callback_data' => 'task_create']
                 ]
             ];
             $this->sendInlineKeyboard($chatId, $message, $keyboard);
             return;
         }
 
-        $message = "<b>Ваші завдання:</b>\n\n";
+        $message = "<b>Your tasks:</b>\n\n";
         
         foreach ($tasks as $index => $task) {
             $statusEmoji = $this->getStatusEmoji($task->status);
             $priorityEmoji = $this->getPriorityEmoji($task->priority);
             
-            $message .= "{$index + 1}. {$statusEmoji} {$priorityEmoji} <b>{$task->title}</b>\n";
+            $message .= ($index + 1) . ". {$statusEmoji} {$priorityEmoji} <b>{$task->title}</b>\n";
             
             if ($task->due_date) {
-                $message .= "📅 До: " . $task->due_date->format('d.m.Y H:i') . "\n";
+                $message .= "📅 Due: " . $task->due_date->format('d.m.Y H:i') . "\n";
             }
             
             $message .= "\n";
@@ -285,47 +392,37 @@ class TelegramBotService
         }
         
         $keyboard[] = [
-            ['text' => '➕ Створити завдання', 'callback_data' => 'task_create']
+            ['text' => '➕ Create Task', 'callback_data' => 'task_create']
         ];
 
         $this->sendInlineKeyboard($chatId, $message, $keyboard);
     }
 
-    /**
-     * Start the task creation process.
-     *
-     * @param int|string $chatId
-     * @param TelegramUser $user
-     * @return void
-     */
     protected function startTaskCreation($chatId, TelegramUser $user): void
     {
-        // This would typically involve a conversation flow
-        // For simplicity, we'll just send instructions
-        $message = "Щоб створити нове завдання, відправте повідомлення у форматі:\n\n";
-        $message .= "<code>/create Назва завдання | Опис завдання | Пріоритет | Дата виконання</code>\n\n";
-        $message .= "Наприклад:\n";
-        $message .= "<code>/create Купити молоко | Купити 2 літри молока в магазині | high | 2023-06-15</code>\n\n";
-        $message .= "Пріоритет може бути: low, medium, high, urgent\n";
-        $message .= "Дата у форматі YYYY-MM-DD";
+        $message = "Choose task creation mode:\n\n";
+        $message .= "📝 Simple Mode - Create task with title only\n";
+        $message .= "🔧 Advanced Mode - Create task with all details";
+        
+        $keyboard = [
+            [
+                ['text' => '📝 Simple Mode', 'callback_data' => 'task_create_simple'],
+                ['text' => '🔧 Advanced Mode', 'callback_data' => 'task_create_advanced']
+            ],
+            [
+                ['text' => '◀️ Back', 'callback_data' => 'task_list']
+            ]
+        ];
 
-        $this->sendMessage($chatId, $message);
+        $this->sendInlineKeyboard($chatId, $message, $keyboard);
     }
 
-    /**
-     * View a task.
-     *
-     * @param int|string $chatId
-     * @param TelegramUser $user
-     * @param int $taskId
-     * @return void
-     */
     protected function viewTask($chatId, TelegramUser $user, $taskId): void
     {
         $task = $user->tasks()->find($taskId);
 
         if (!$task) {
-            $this->sendMessage($chatId, "Завдання не знайдено або у вас немає доступу до нього.");
+            $this->sendMessage($chatId, "Task not found or you don't have access to it.");
             return;
         }
 
@@ -333,98 +430,70 @@ class TelegramBotService
         $priorityEmoji = $this->getPriorityEmoji($task->priority);
         
         $message = "<b>{$task->title}</b>\n\n";
-        $message .= "Статус: {$statusEmoji} " . ucfirst($task->status) . "\n";
-        $message .= "Пріоритет: {$priorityEmoji} " . ucfirst($task->priority) . "\n";
+        $message .= "Status: {$statusEmoji} " . ucfirst($task->status) . "\n";
+        $message .= "Priority: {$priorityEmoji} " . ucfirst($task->priority) . "\n";
         
         if ($task->due_date) {
-            $message .= "Термін виконання: 📅 " . $task->due_date->format('d.m.Y H:i') . "\n";
+            $message .= "Due date: 📅 " . $task->due_date->format('d.m.Y H:i') . "\n";
         }
         
         if ($task->description) {
-            $message .= "\nОпис:\n{$task->description}\n";
+            $message .= "\nDescription:\n{$task->description}\n";
         }
         
         $files = $task->files;
         if ($files->count() > 0) {
-            $message .= "\nПрикріплені файли: " . $files->count() . "\n";
+            $message .= "\nAttached files: " . $files->count() . "\n";
         }
 
         $keyboard = [
             [
-                ['text' => '✏️ Редагувати', 'callback_data' => "task_edit:{$task->id}"],
-                ['text' => '🗑️ Видалити', 'callback_data' => "task_delete:{$task->id}"]
+                ['text' => '✏️ Edit', 'callback_data' => "task_edit:{$task->id}"],
+                ['text' => '🗑️ Delete', 'callback_data' => "task_delete:{$task->id}"]
             ],
             [
-                ['text' => '✅ Виконано', 'callback_data' => "task_status:{$task->id}:completed"],
-                ['text' => '⏳ В процесі', 'callback_data' => "task_status:{$task->id}:in_progress"]
+                ['text' => '✅ Complete', 'callback_data' => "task_status:{$task->id}:completed"],
+                ['text' => '⏳ In Progress', 'callback_data' => "task_status:{$task->id}:in_progress"]
             ],
             [
-                ['text' => '◀️ Назад до списку', 'callback_data' => "task_list"]
+                ['text' => '◀️ Back to List', 'callback_data' => "task_list"]
             ]
         ];
 
         $this->sendInlineKeyboard($chatId, $message, $keyboard);
     }
 
-    /**
-     * Edit a task.
-     *
-     * @param int|string $chatId
-     * @param TelegramUser $user
-     * @param int $taskId
-     * @return void
-     */
     protected function editTask($chatId, TelegramUser $user, $taskId): void
     {
-        // This would typically involve a conversation flow
-        // For simplicity, we'll just send instructions
-        $message = "Щоб редагувати завдання, відправте повідомлення у форматі:\n\n";
-        $message .= "<code>/edit {$taskId} Назва завдання | Опис завдання | Пріоритет | Дата виконання</code>\n\n";
-        $message .= "Наприклад:\n";
-        $message .= "<code>/edit {$taskId} Купити молоко | Купити 2 літри молока в магазині | high | 2023-06-15</code>";
+        $message = "To edit a task, send a message in the format:\n\n";
+        $message .= "<code>/edit {$taskId} Task title | Task description | Priority | Due date</code>\n\n";
+        $message .= "Example:\n";
+        $message .= "<code>/edit {$taskId} Buy milk | Buy 2 liters of milk from store | high | 2023-06-15</code>";
 
         $this->sendMessage($chatId, $message);
     }
 
-    /**
-     * Delete a task.
-     *
-     * @param int|string $chatId
-     * @param TelegramUser $user
-     * @param int $taskId
-     * @return void
-     */
     protected function deleteTask($chatId, TelegramUser $user, $taskId): void
     {
         $task = $user->tasks()->find($taskId);
 
         if (!$task) {
-            $this->sendMessage($chatId, "Завдання не знайдено або у вас немає доступу до нього.");
+            $this->sendMessage($chatId, "Task not found or you don't have access to it.");
             return;
         }
 
         $task->delete();
-        $this->sendMessage($chatId, "✅ Завдання \"{$task->title}\" було успішно видалено.");
+        $this->sendMessage($chatId, "✅ Task \"{$task->title}\" was successfully deleted.");
         
-        // Show the task list again
         $this->sendTaskList($chatId, $user);
     }
 
-    /**
-     * Update the status of a task.
-     *
-     * @param int|string $chatId
-     * @param TelegramUser $user
-     * @param int $taskId
-     * @param string $status
-     * @return void
-     */
     protected function updateTaskStatus($chatId, TelegramUser $user, $taskId, $status): void
     {
         $task = $user->tasks()->find($taskId);
 
         if (!$task) {
-            $this->sendMessage($chatId, "Завдання не знайдено або у вас немає доступу до нього.");
+            $this->sendMessage($chatId, "Task not found or you don't have access to it.");
             return;
         }
 
@@ -432,25 +501,18 @@ class TelegramBotService
         $task->save();
 
         $statusText = match($status) {
-            'pending' => 'очікує',
-            'in_progress' => 'в процесі',
-            'completed' => 'виконано',
-            'cancelled' => 'скасовано',
+            'pending' => 'pending',
+            'in_progress' => 'in progress',
+            'completed' => 'completed',
+            'cancelled' => 'cancelled',
             default => $status
         };
 
-        $this->sendMessage($chatId, "✅ Статус завдання \"{$task->title}\" змінено на \"{$statusText}\".");
+        $this->sendMessage($chatId, "✅ Task \"{$task->title}\" status changed to \"{$statusText}\".");
         
-        // Show the task again
         $this->viewTask($chatId, $user, $taskId);
     }
 
-    /**
-     * Save or update a Telegram user.
-     *
-     * @param array $userData
-     * @return TelegramUser
-     */
     protected function saveUser(array $userData): TelegramUser
     {
         return TelegramUser::updateOrCreate(
@@ -465,13 +527,6 @@ class TelegramBotService
         );
     }
 
-    /**
-     * Save or update a Telegram group and add the user as a member.
-     *
-     * @param array $chatData
-     * @param TelegramUser $user
-     * @return TelegramGroup
-     */
     protected function saveGroup(array $chatData, TelegramUser $user): TelegramGroup
     {
         $group = TelegramGroup::updateOrCreate(
@@ -491,12 +546,6 @@ class TelegramBotService
         return $group;
     }
 
-    /**
-     * Get emoji for task status.
-     *
-     * @param string $status
-     * @return string
-     */
     protected function getStatusEmoji(string $status): string
     {
         return match($status) {
@@ -508,12 +557,6 @@ class TelegramBotService
         };
     }
 
-    /**
-     * Get emoji for task priority.
-     *
-     * @param string $priority
-     * @return string
-     */
     protected function getPriorityEmoji(string $priority): string
     {
         return match($priority) {

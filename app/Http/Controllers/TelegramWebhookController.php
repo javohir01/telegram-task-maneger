@@ -5,8 +5,9 @@ namespace App\Http\Controllers;
 use App\Services\TelegramBotService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Routing\Controller as BaseController;
 
-class TelegramWebhookController extends Controller
+class TelegramWebhookController extends BaseController
 {
     protected $telegramService;
 
@@ -15,13 +16,12 @@ class TelegramWebhookController extends Controller
         $this->telegramService = $telegramService;
     }
 
-    /**
-     * Handle the incoming Telegram webhook request.
-     */
     public function handle(Request $request)
     {
         $update = $request->all();
         
+        Log::info('Telegram webhook request:', $request->all());
+
         Log::info('Telegram webhook received', [
             'update_id' => $update['update_id'] ?? null,
             'has_message' => isset($update['message']),
